@@ -102,3 +102,15 @@ Official Telegram self-updates are disabled in the CrossGram variant to prevent 
 public-key configuration. On non-release runs without this variable, it
 produces a clearly marked `.example` file, **not** a login-ready client.
 Do not place any server private key or session data in Actions variables.
+
+
+### CI runner capacity
+
+The Windows standard GitHub-hosted runner has limited free disk space. The
+WSS workflow removes nonessential Android/.NET/toolcache SDK installations
+from its **ephemeral runner** before installing Qt and checks remaining space.
+Both full-build jobs run on GitHub-hosted runners by default so that personal
+account repositories do not wait indefinitely for unconfigured Depot runners.
+For a connected larger/self-hosted runner, set `CROSSGRAM_WINDOWS_RUNNER`
+and/or `CROSSGRAM_LINUX_RUNNER` repository variables to its available label.
+The fast native Qt syntax check always uses GitHub-hosted Ubuntu.

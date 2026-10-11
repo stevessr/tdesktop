@@ -62,7 +62,7 @@ jobs:
   linux:
     needs: native-smoke
     name: CrossGram Linux x64 (Debug)
-    runs-on: depot-ubuntu-latest-16
+    runs-on: ${{ vars.CROSSGRAM_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -127,11 +127,33 @@ jobs:
   windows:
     needs: native-smoke
     name: CrossGram Windows x64 (Debug)
-    runs-on: depot-windows-latest-16
+    runs-on: ${{ vars.CROSSGRAM_WINDOWS_RUNNER || 'windows-latest' }}
     defaults:
       run:
         shell: cmd
     steps:
+      - name: Reclaim optional Windows SDK storage
+        shell: pwsh
+        run: |
+          $unused = @(
+            'C:\Program Files (x86)\Android',
+            'C:\Program Files\Android',
+            'C:\Program Files\dotnet\sdk',
+            'C:\hostedtoolcache\windows\go',
+            'C:\hostedtoolcache\windows\Ruby'
+          )
+          foreach ($path in $unused) {
+            if (Test-Path -LiteralPath $path) {
+              Write-Host "Reclaiming unused runner component: $path"
+              try {
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+              } catch {
+                Write-Warning "Could not remove $path : $_"
+              }
+            }
+          }
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+          Write-Host ("Windows C: free: {0:n1} GiB" -f ($disk.FreeSpace / 1GB))
       - name: Prepare directory layout
         run: |
           mkdir %userprofile%\TBuild\Libraries
@@ -175,8 +197,8 @@ jobs:
           $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
           $free = [math]::Round($disk.FreeSpace / 1GB, 1)
           Write-Host "Free C: drive space after Qt setup: $free GiB"
-          if ($free -lt 20) {
-            throw "Insufficient disk space for a tdesktop Debug build (need at least 20 GiB free)."
+          if ($free -lt 8) {
+            throw "Insufficient disk space for a tdesktop Debug build (need at least 8 GiB after Qt setup)."
           }
       - name: Compile CrossGram WSS client
         run: |
