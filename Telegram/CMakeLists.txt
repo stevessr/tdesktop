@@ -26,6 +26,7 @@ get_filename_component(res_loc Resources REALPATH)
 
 option(CROSSGRAM_WSS_BUILD "Build an isolated CrossGram MTProto-over-WSS client." OFF)
 if (CROSSGRAM_WSS_BUILD)
+    set(DESKTOP_APP_DISABLE_AUTOUPDATE ON)
     find_package(Qt6 REQUIRED COMPONENTS WebSockets)
     target_compile_definitions(Telegram PRIVATE CROSSGRAM_WSS_BUILD)
     target_link_libraries(Telegram PRIVATE Qt6::WebSockets)

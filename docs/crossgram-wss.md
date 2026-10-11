@@ -98,7 +98,7 @@ Repository **variables** (not secrets) for a deployable release:
 - `CROSSGRAM_WSS_URL`: optional deployment URL (defaults to the
   `x.wmc.de5.net` target above).
 
-The build uses `scripts/crossgram_wss_config.py` to package the validated
+Official Telegram self-updates are disabled in the CrossGram variant to prevent an\nofficial update from replacing this client. Install future WSS builds from\nGitHub Releases instead.\n\nThe build uses `scripts/crossgram_wss_config.py` to package the validated
 public-key configuration. On non-release runs without this variable, it
 produces a clearly marked `.example` file, **not** a login-ready client.
 Do not place any server private key or session data in Actions variables.

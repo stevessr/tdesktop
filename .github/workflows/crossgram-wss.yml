@@ -79,7 +79,6 @@ jobs:
         run: |
           mkdir -p dist/crossgram-wss-linux-x64
           install -m 755 out/Debug/Telegram dist/crossgram-wss-linux-x64/CrossGram
-          install -m 755 out/Debug/Updater dist/crossgram-wss-linux-x64/Updater
           python3 scripts/crossgram_wss_config.py \
             --output dist/crossgram-wss-linux-x64/crossgram-wss.json \
             ${{ startsWith(github.ref, 'refs/tags/') && '--require-public-key' || '' }}
@@ -150,7 +149,6 @@ jobs:
           $dir = "dist/crossgram-wss-windows-x64"
           New-Item -ItemType Directory -Force $dir | Out-Null
           Copy-Item "TBuild/tdesktop/out/Debug/Telegram.exe" "$dir/CrossGram.exe"
-          Copy-Item "TBuild/tdesktop/out/Debug/Updater.exe" "$dir/Updater.exe"
           $extra = @()
           if ($env:GITHUB_REF -like "refs/tags/*") { $extra += "--require-public-key" }
           python TBuild/tdesktop/scripts/crossgram_wss_config.py --output "$dir/crossgram-wss.json" @extra
