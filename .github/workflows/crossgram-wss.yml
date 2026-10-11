@@ -17,6 +17,10 @@ on:
       - 'Telegram/build/prepare/prepare.py'
       - 'Telegram/build/docker/centos_env/Dockerfile'
 
+concurrency:
+  group: crossgram-wss-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -29,7 +33,7 @@ env:
 jobs:
   linux:
     name: CrossGram Linux x64 (Debug)
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest-16
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,7 +97,7 @@ jobs:
 
   windows:
     name: CrossGram Windows x64 (Debug)
-    runs-on: windows-latest
+    runs-on: depot-windows-latest-16
     defaults:
       run:
         shell: cmd
@@ -135,14 +139,25 @@ jobs:
           else
             echo "TDESKTOP_API_OPTIONS=-D TDESKTOP_API_TEST=ON" >> "$GITHUB_ENV"
           fi
+      - name: Verify Windows disk space
+        shell: pwsh
+        run: |
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+          $free = [math]::Round($disk.FreeSpace / 1GB, 1)
+          Write-Host "Free C: drive space after Qt setup: $free GiB"
+          if ($free -lt 20) {
+            throw "Insufficient disk space for a tdesktop Debug build (need at least 20 GiB free)."
+          }
       - name: Compile CrossGram WSS client
         run: |
           cd %TBUILD%\tdesktop\Telegram
           call configure.bat x64 qt6 ^
             %TDESKTOP_API_OPTIONS% ^
             -D CMAKE_CONFIGURATION_TYPES=Debug ^
+            -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
             -D CROSSGRAM_WSS_BUILD=ON
-          cmake --build ..\out --config Debug --parallel
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build ..\out --config Debug --parallel 6
       - name: Archive Windows binaries
         shell: pwsh
         run: |
