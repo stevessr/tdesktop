@@ -46,7 +46,7 @@ WssTransport::WssTransport(QObject *parent) : QObject(parent) {
 		_outgoing.clear();
 		if (onClose) onClose();
 	});
-	connect(&_websocket, &QWebSocket::sslErrors, this, [=](const auto &) {
+	connect(&_websocket, &QWebSocket::sslErrors, this, [=] {
 		terminate("tls-verification");
 	});
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
@@ -59,7 +59,7 @@ WssTransport::WssTransport(QObject *parent) : QObject(parent) {
 			: code == QAbstractSocket::ConnectionRefusedError ? "connection-refused"
 			: "network-or-upgrade");
 	});
-	connect(&_websocket, &QWebSocket::textFrameReceived, this, [=](const auto &) {
+	connect(&_websocket, &QWebSocket::textFrameReceived, this, [=] {
 		terminate("unexpected-text-frame");
 	});
 	connect(&_websocket, &QWebSocket::binaryFrameReceived, this, [=](
@@ -159,6 +159,7 @@ void WssTransport::send(
 	if (headerSize) _outgoing.append(header, headerSize);
 	if (bodySize) _outgoing.append(body, bodySize);
 	flush();
+	if (_stopped) return;
 	if (!_outgoing.isEmpty() || _websocket.bytesToWrite()) {
 		_writeDeadline.start(30000);
 	}

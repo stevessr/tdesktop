@@ -44,7 +44,9 @@ jobs:
         working-directory: Telegram/build/docker/centos_env
         run: |
           "$HOME/.local/bin/poetry" install
-          "$HOME/.local/bin/poetry" run gen_dockerfile > Dockerfile
+          DOCKERFILE="$(DEBUG= LTO= "$HOME/.local/bin/poetry" run gen_dockerfile)"
+          test -n "$DOCKERFILE"
+          printf "%s\\n" "$DOCKERFILE" > Dockerfile
       - uses: docker/setup-buildx-action@v3
       - name: Build Qt and dependencies image
         run: docker build -t crossgram-qt-wss Telegram/build/docker/centos_env

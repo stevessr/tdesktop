@@ -75,6 +75,7 @@ bool LoadConnectionSettings(
 	const auto url = QUrl(urlText, QUrl::StrictMode);
 	if (!url.isValid() || url.scheme() != u"wss"
 		|| url.userName().size() || url.password().size()
+		|| url.authority().contains(u'@')
 		|| url.hasFragment() || !url.path().startsWith(u'/')
 		|| url.path().isEmpty() || url.port(443) < 1
 		|| url.port(443) > 65535 || !ValidDomain(url.host())) {
