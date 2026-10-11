@@ -31,7 +31,36 @@ env:
   CROSSGRAM_API_HASH: ${{ vars.CROSSGRAM_API_HASH }}
 
 jobs:
+  native-smoke:
+    name: CrossGram WSS source validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev qt6-websockets-dev pkg-config
+      - name: Type-check native transport and configuration
+        run: |
+          c++ -std=c++20 -fPIC -fsyntax-only \
+            -include scripts/crossgram/qt_literal_smoke.h \
+            -I Telegram/SourceFiles \
+            $(pkg-config --cflags Qt6Core Qt6Network Qt6WebSockets) \
+            Telegram/SourceFiles/crossgram/wss_transport.cpp \
+            Telegram/SourceFiles/crossgram/connection_settings.cpp
+      - name: Validate public config generator
+        run: |
+          python3 -m py_compile scripts/crossgram_wss_config.py
+          python3 scripts/crossgram_wss_config.py --output /tmp/crossgram-wss.json
+          test -f /tmp/crossgram-wss.json.example
+          if CROSSGRAM_WSS_URL='ws://example.org/mtproto' \
+            python3 scripts/crossgram_wss_config.py --output /tmp/rejected.json; then
+            echo 'Rejected insecure ws:// URL was accepted' >&2
+            exit 1
+          fi
+
   linux:
+    needs: native-smoke
     name: CrossGram Linux x64 (Debug)
     runs-on: depot-ubuntu-latest-16
     steps:
@@ -96,6 +125,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: native-smoke
     name: CrossGram Windows x64 (Debug)
     runs-on: depot-windows-latest-16
     defaults:
