@@ -1019,6 +1019,14 @@ void SessionPrivate::connectToServer(bool afterConfig) {
 
 	destroyAllConnections();
 
+#ifdef CROSSGRAM_WSS_BUILD
+	if (_instance->dcOptions().crossgramVariant()
+		&& !_instance->dcOptions().crossgramActive()) {
+		setState(DisconnectedState);
+		return;
+	}
+#endif
+
 	if (realDcTypeChanged() && _keyCreator) {
 		destroyTemporaryKey();
 		return;
@@ -1035,6 +1043,16 @@ void SessionPrivate::connectToServer(bool afterConfig) {
 			return;
 		}
 	}
+#ifdef CROSSGRAM_WSS_BUILD
+	if (_instance->dcOptions().crossgramActive()) {
+		if (_currentDcType == DcType::Cdn) {
+			setState(DisconnectedState);
+			return;
+		}
+		_options->proxy = ProxyData();
+		appendTestConnection(DcOptions::Variants::Tcp, {}, 0, {});
+	} else
+#endif
 	if (_options->proxy.type == ProxyData::Type::Mtproto
 		|| _options->proxy.type == ProxyData::Type::Web) {
 		// host, port, secret for mtproto proxy are taken from proxy.

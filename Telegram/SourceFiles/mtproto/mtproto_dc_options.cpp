@@ -126,7 +126,10 @@ DcOptions::DcOptions(const DcOptions &other)
 , _cdnDcIds(other._cdnDcIds)
 , _publicKeys(other._publicKeys)
 , _cdnPublicKeys(other._cdnPublicKeys)
-, _immutable(other._immutable) {
+, _immutable(other._immutable)
+, _crossgramUrl(other._crossgramUrl)
+, _crossgramActive(other._crossgramActive)
+, _crossgramBlocked(other._crossgramBlocked) {
 }
 
 DcOptions::~DcOptions() = default;
@@ -161,6 +164,68 @@ Environment DcOptions::environment() const {
 
 bool DcOptions::isTestMode() const {
 	return (_environment != Environment::Production);
+}
+
+
+bool DcOptions::activateCrossgram(
+		const QUrl &url,
+		const QByteArray &rsaPublicKey,
+		const std::vector<int> &dcIds) {
+	auto key = RSAPublicKey(bytes::make_span(rsaPublicKey));
+	if (!key.valid() || key.getN().size() != 256 || dcIds.empty()
+		|| !url.isValid() || url.scheme() != u"wss") {
+		return false;
+	}
+	auto endpoints = base::flat_map<DcId, std::vector<Endpoint>>();
+	for (const auto id : dcIds) {
+		if (!ApplyOneOption(
+				endpoints, id, Flag::f_static, "0.0.0.0", 443, {})) {
+			return false;
+		}
+	}
+	const auto changes = [&] {
+		ReadLocker lock(this);
+		return CountOptionsDifference(_data, endpoints);
+	}();
+	{
+		WriteLocker lock(this);
+		_data = std::move(endpoints);
+		_publicKeys.clear();
+		_publicKeys.emplace(key.fingerprint(), std::move(key));
+		_cdnPublicKeys.clear();
+		_immutable = true;
+		_crossgramUrl = url.toString(QUrl::FullyEncoded);
+		_crossgramActive = true;
+		_crossgramBlocked = false;
+	}
+	for (const auto id : changes) _changed.fire_copy(id);
+	return true;
+}
+
+void DcOptions::blockCrossgram() {
+	WriteLocker lock(this);
+	_data.clear();
+	_publicKeys.clear();
+	_cdnPublicKeys.clear();
+	_crossgramUrl.clear();
+	_crossgramActive = false;
+	_crossgramBlocked = true;
+	_immutable = true;
+}
+
+bool DcOptions::crossgramActive() const {
+	ReadLocker lock(this);
+	return _crossgramActive;
+}
+
+bool DcOptions::crossgramVariant() const {
+	ReadLocker lock(this);
+	return _crossgramActive || _crossgramBlocked;
+}
+
+QString DcOptions::crossgramUrl() const {
+	ReadLocker lock(this);
+	return _crossgramUrl;
 }
 
 void DcOptions::constructFromBuiltIn() {

@@ -24,6 +24,21 @@ add_subdirectory(codegen)
 get_filename_component(src_loc SourceFiles REALPATH)
 get_filename_component(res_loc Resources REALPATH)
 
+option(CROSSGRAM_WSS_BUILD "Build an isolated CrossGram MTProto-over-WSS client." OFF)
+if (CROSSGRAM_WSS_BUILD)
+    find_package(Qt6 REQUIRED COMPONENTS WebSockets)
+    target_compile_definitions(Telegram PRIVATE CROSSGRAM_WSS_BUILD)
+    target_link_libraries(Telegram PRIVATE Qt6::WebSockets)
+    target_sources(Telegram PRIVATE
+        ${src_loc}/crossgram/connection_settings.h
+        ${src_loc}/crossgram/connection_settings.cpp
+        ${src_loc}/crossgram/wss_transport.h
+        ${src_loc}/crossgram/wss_transport.cpp
+        ${src_loc}/crossgram/wss_socket.h
+        ${src_loc}/crossgram/wss_socket.cpp
+    )
+endif()
+
 include(cmake/telegram_options.cmake)
 include(cmake/lib_ffmpeg.cmake)
 include(cmake/lib_stripe.cmake)
@@ -36,6 +51,9 @@ include(cmake/td_gram.cmake)
 include(cmake/td_iv.cmake)
 include(cmake/td_lang.cmake)
 include(cmake/td_mtproto.cmake)
+if (CROSSGRAM_WSS_BUILD)
+    target_compile_definitions(td_mtproto PRIVATE CROSSGRAM_WSS_BUILD)
+endif()
 include(cmake/td_scheme.cmake)
 include(cmake/td_tde2e.cmake)
 include(cmake/td_ui.cmake)

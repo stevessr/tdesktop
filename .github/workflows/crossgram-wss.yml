@@ -1,0 +1,184 @@
+name: CrossGram over WSS CDN
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'crossgram-wss-v*'
+  pull_request:
+    paths:
+      - '.github/workflows/crossgram-wss.yml'
+      - 'scripts/crossgram_wss_config.py'
+      - 'Telegram/SourceFiles/crossgram/**'
+      - 'Telegram/SourceFiles/mtproto/**'
+      - 'Telegram/SourceFiles/main/main_account.*'
+      - 'Telegram/SourceFiles/core/launcher.cpp'
+      - 'Telegram/CMakeLists.txt'
+      - 'Telegram/build/prepare/prepare.py'
+      - 'Telegram/build/docker/centos_env/Dockerfile'
+
+permissions:
+  contents: read
+
+env:
+  CROSSGRAM_WSS_URL: ${{ vars.CROSSGRAM_WSS_URL }}
+  CROSSGRAM_RSA_PUBLIC_PEM_B64: ${{ vars.CROSSGRAM_RSA_PUBLIC_PEM_B64 }}
+  CROSSGRAM_API_ID: ${{ vars.CROSSGRAM_API_ID }}
+  CROSSGRAM_API_HASH: ${{ vars.CROSSGRAM_API_HASH }}
+
+jobs:
+  linux:
+    name: CrossGram Linux x64 (Debug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Setup build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-venv ccache
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Generate Linux build Dockerfile
+        working-directory: Telegram/build/docker/centos_env
+        run: |
+          "$HOME/.local/bin/poetry" install
+          "$HOME/.local/bin/poetry" run gen_dockerfile > Dockerfile
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Qt and dependencies image
+        run: docker build -t crossgram-qt-wss Telegram/build/docker/centos_env
+      - name: Resolve API options
+        shell: bash
+        run: |
+          if [[ -n "$CROSSGRAM_API_ID" && -n "$CROSSGRAM_API_HASH" ]]; then
+            printf 'TDESKTOP_API_OPTIONS=-D TDESKTOP_API_ID=%s -D TDESKTOP_API_HASH=%s\n' "$CROSSGRAM_API_ID" "$CROSSGRAM_API_HASH" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF" == refs/tags/crossgram-wss-v* ]]; then
+            echo "::error::Set CROSSGRAM_API_ID and CROSSGRAM_API_HASH repository variables before releasing."
+            exit 1
+          else
+            echo "TDESKTOP_API_OPTIONS=-D TDESKTOP_API_TEST=ON" >> "$GITHUB_ENV"
+          fi
+      - name: Compile CrossGram WSS client
+        shell: bash
+        run: |
+          docker run --rm -u "$(id -u)" \
+            -v "$PWD:/usr/src/tdesktop" \
+            -e CONFIG=Debug \
+            crossgram-qt-wss \
+            /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
+            -D CMAKE_CONFIGURATION_TYPES=Debug \
+            -D CMAKE_C_FLAGS_DEBUG="-O0 -fpch-preprocess" \
+            -D CMAKE_CXX_FLAGS_DEBUG="-O0 -fpch-preprocess" \
+            -D CROSSGRAM_WSS_BUILD=ON \
+            $TDESKTOP_API_OPTIONS
+      - name: Create Linux release archive
+        shell: bash
+        run: |
+          mkdir -p dist/crossgram-wss-linux-x64
+          install -m 755 out/Debug/Telegram dist/crossgram-wss-linux-x64/CrossGram
+          install -m 755 out/Debug/Updater dist/crossgram-wss-linux-x64/Updater
+          python3 scripts/crossgram_wss_config.py \
+            --output dist/crossgram-wss-linux-x64/crossgram-wss.json \
+            ${{ startsWith(github.ref, 'refs/tags/') && '--require-public-key' || '' }}
+          cp docs/crossgram-wss.md dist/crossgram-wss-linux-x64/README-WSS.md
+          tar -czf dist/crossgram-wss-linux-x64.tar.gz -C dist crossgram-wss-linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crossgram-wss-linux-x64
+          path: dist/crossgram-wss-linux-x64.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
+  windows:
+    name: CrossGram Windows x64 (Debug)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Prepare directory layout
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: TBuild/tdesktop
+      - name: Get required SDK version
+        shell: bash
+        run: |
+          sdk="$(grep 'SDK version' TBuild/tdesktop/docs/building-win.md | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$sdk" >> "$GITHUB_ENV"
+      - uses: Eden-CI/msvc-dev-cmd@master
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: '14.44'
+      - name: NuGet sources
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+      - name: Prepare Qt libraries
+        run: |
+          %TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent qt6
+      - name: Resolve API options
+        shell: bash
+        run: |
+          if [[ -n "$CROSSGRAM_API_ID" && -n "$CROSSGRAM_API_HASH" ]]; then
+            printf 'TDESKTOP_API_OPTIONS=-D TDESKTOP_API_ID=%s -D TDESKTOP_API_HASH=%s\n' "$CROSSGRAM_API_ID" "$CROSSGRAM_API_HASH" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF" == refs/tags/crossgram-wss-v* ]]; then
+            echo "::error::Set CROSSGRAM_API_ID and CROSSGRAM_API_HASH repository variables before releasing."
+            exit 1
+          else
+            echo "TDESKTOP_API_OPTIONS=-D TDESKTOP_API_TEST=ON" >> "$GITHUB_ENV"
+          fi
+      - name: Compile CrossGram WSS client
+        run: |
+          cd %TBUILD%\tdesktop\Telegram
+          call configure.bat x64 qt6 ^
+            %TDESKTOP_API_OPTIONS% ^
+            -D CMAKE_CONFIGURATION_TYPES=Debug ^
+            -D CROSSGRAM_WSS_BUILD=ON
+          cmake --build ..\out --config Debug --parallel
+      - name: Archive Windows binaries
+        shell: pwsh
+        run: |
+          $dir = "dist/crossgram-wss-windows-x64"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item "TBuild/tdesktop/out/Debug/Telegram.exe" "$dir/CrossGram.exe"
+          Copy-Item "TBuild/tdesktop/out/Debug/Updater.exe" "$dir/Updater.exe"
+          $extra = @()
+          if ($env:GITHUB_REF -like "refs/tags/*") { $extra += "--require-public-key" }
+          python TBuild/tdesktop/scripts/crossgram_wss_config.py --output "$dir/crossgram-wss.json" @extra
+          Copy-Item "TBuild/tdesktop/docs/crossgram-wss.md" "$dir/README-WSS.md"
+          Compress-Archive -Path "$dir/*" -DestinationPath "dist/crossgram-wss-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crossgram-wss-windows-x64
+          path: dist/crossgram-wss-windows-x64.zip
+          retention-days: 14
+          if-no-files-found: error
+
+  publish:
+    name: Publish CrossGram WSS binaries
+    if: startsWith(github.ref, 'refs/tags/crossgram-wss-v')
+    runs-on: ubuntu-latest
+    needs: [linux, windows]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: crossgram-wss-*
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "CrossGram over WSS/CDN $GITHUB_REF_NAME" \
+            --generate-notes

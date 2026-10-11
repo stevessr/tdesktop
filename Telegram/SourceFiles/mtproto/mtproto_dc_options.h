@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include <QtCore/QUrl>
+
 #include "base/bytes.h"
 
 #include <QtCore/QReadWriteLock>
@@ -66,6 +68,14 @@ public:
 
 	[[nodiscard]] Environment environment() const;
 	[[nodiscard]] bool isTestMode() const;
+	[[nodiscard]] bool activateCrossgram(
+		const QUrl &url,
+		const QByteArray &rsaPublicKey,
+		const std::vector<int> &dcIds);
+	void blockCrossgram();
+	[[nodiscard]] bool crossgramActive() const;
+	[[nodiscard]] bool crossgramVariant() const;
+	[[nodiscard]] QString crossgramUrl() const;
 
 	// construct methods don't notify "changed" subscribers.
 	bool constructFromSerialized(const QByteArray &serialized);
@@ -161,6 +171,9 @@ private:
 
 	// True when we have overriden options from a .tdesktop-endpoints file.
 	bool _immutable = false;
+	QString _crossgramUrl;
+	bool _crossgramActive = false;
+	bool _crossgramBlocked = false;
 
 };
 
