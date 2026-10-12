@@ -2,6 +2,15 @@ name: CrossGram over WSS CDN
 
 on:
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build configuration (Debug or Release)'
+        type: choice
+        options:
+          - Debug
+          - Release
+        default: Debug
+        required: true
   push:
     tags:
       - 'crossgram-wss-v*'
@@ -29,6 +38,7 @@ env:
   CROSSGRAM_RSA_PUBLIC_PEM_B64: ${{ vars.CROSSGRAM_RSA_PUBLIC_PEM_B64 }}
   CROSSGRAM_API_ID: ${{ vars.CROSSGRAM_API_ID }}
   CROSSGRAM_API_HASH: ${{ vars.CROSSGRAM_API_HASH }}
+  CROSSGRAM_BUILD_TYPE: ${{ startsWith(github.ref, 'refs/tags/crossgram-wss-v') && 'Release' || inputs.build_type || 'Debug' }}
 
 jobs:
   native-smoke:
@@ -61,7 +71,7 @@ jobs:
 
   linux:
     needs: native-smoke
-    name: CrossGram Linux x64 (Debug)
+    name: CrossGram Linux x64
     runs-on: ${{ vars.CROSSGRAM_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
@@ -114,18 +124,19 @@ jobs:
       - name: Compile CrossGram WSS client
         shell: bash
         run: |
+          args=( -D CMAKE_CONFIGURATION_TYPES="$CROSSGRAM_BUILD_TYPE" -D CROSSGRAM_WSS_BUILD=ON )
+          if [[ "$CROSSGRAM_BUILD_TYPE" == Debug ]]; then
+            args+=( -D CMAKE_C_FLAGS_DEBUG="-O0 -fpch-preprocess" )
+            args+=( -D CMAKE_CXX_FLAGS_DEBUG="-O0 -fpch-preprocess" )
+          fi
           docker run --rm -u "$(id -u):$(id -g)" \
             -v "$PWD:/usr/src/tdesktop" \
             -v "$RUNNER_TEMP/crossgram-ccache:/var/cache/ccache" \
             -e CCACHE_MAXSIZE=1500M \
-            -e CONFIG=Debug \
+            -e CONFIG="$CROSSGRAM_BUILD_TYPE" \
             crossgram-qt-wss \
             /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
-            -D CMAKE_CONFIGURATION_TYPES=Debug \
-            -D CMAKE_C_FLAGS_DEBUG="-O0 -fpch-preprocess" \
-            -D CMAKE_CXX_FLAGS_DEBUG="-O0 -fpch-preprocess" \
-            -D CROSSGRAM_WSS_BUILD=ON \
-            $TDESKTOP_API_OPTIONS
+            "${args[@]}" $TDESKTOP_API_OPTIONS
       - name: Save native Linux compiler cache
         if: always()
         uses: actions/cache/save@v4
@@ -135,23 +146,25 @@ jobs:
       - name: Create Linux release archive
         shell: bash
         run: |
-          mkdir -p dist/crossgram-wss-linux-x64
-          install -m 755 out/Debug/Telegram dist/crossgram-wss-linux-x64/CrossGram
+          flavor="${CROSSGRAM_BUILD_TYPE,,}"
+          folder="crossgram-wss-linux-x64-$flavor"
+          mkdir -p "dist/$folder"
+          install -m 755 "out/$CROSSGRAM_BUILD_TYPE/Telegram" "dist/$folder/CrossGram"
           python3 scripts/crossgram_wss_config.py \
-            --output dist/crossgram-wss-linux-x64/crossgram-wss.json \
+            --output "dist/$folder/crossgram-wss.json" \
             ${{ startsWith(github.ref, 'refs/tags/') && '--require-public-key' || '' }}
-          cp docs/crossgram-wss.md dist/crossgram-wss-linux-x64/README-WSS.md
-          tar -czf dist/crossgram-wss-linux-x64.tar.gz -C dist crossgram-wss-linux-x64
+          cp docs/crossgram-wss.md "dist/$folder/README-WSS.md"
+          tar -czf "dist/$folder.tar.gz" -C dist "$folder"
       - uses: actions/upload-artifact@v4
         with:
-          name: crossgram-wss-linux-x64
-          path: dist/crossgram-wss-linux-x64.tar.gz
+          name: crossgram-wss-linux-x64-${{ env.CROSSGRAM_BUILD_TYPE }}
+          path: dist/crossgram-wss-linux-x64-*.tar.gz
           retention-days: 14
           if-no-files-found: error
 
   windows:
     needs: native-smoke
-    name: CrossGram Windows x64 (Debug)
+    name: CrossGram Windows x64
     runs-on: ${{ vars.CROSSGRAM_WINDOWS_RUNNER || 'windows-latest' }}
     defaults:
       run:
@@ -214,19 +227,37 @@ jobs:
             crossgram-wss-windows-pkgs-${{ runner.os }}-
       - name: Prepare Qt libraries
         run: |
-          %TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent qt6
+          if /I "%CROSSGRAM_BUILD_TYPE%"=="Debug" (
+            call %TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent qt6
+          ) else (
+            call %TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent qt6
+          )
+          if errorlevel 1 exit /b %errorlevel%
       - name: Reclaim installed Qt source and intermediate build tree
         shell: pwsh
         run: |
           $root = Join-Path $env:USERPROFILE 'TBuild\Libraries\win64'
-          $installed = @(Get-ChildItem -LiteralPath (Join-Path $root 'local') -Directory -Filter 'Qt-*' -ErrorAction SilentlyContinue)
+          # Qt lives in Libraries/win64/Qt-<version>, not in Libraries/win64/local.
+          # Do not remove its source tree unless the installed Qt6 CMake package exists.
+          $installed = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'Qt-*' -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'lib\cmake\Qt6\Qt6Config.cmake') })
           if ($installed.Count -eq 0) {
-            throw "Qt installation not found; refusing to remove Qt build sources."
+            throw "No installed Qt6 CMake package in $root; refusing to remove Qt sources."
           }
-          $sources = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'qt_*' -ErrorAction SilentlyContinue)
+          Write-Host "Installed Qt: $($installed.FullName -join ', ')"
+          $sources = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'qt_*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^qt_[0-9]' })
           foreach ($source in $sources) {
             Write-Host "Removing unused Qt source/build stage: $($source.FullName)"
-            Remove-Item -LiteralPath $source.FullName -Recurse -Force -ErrorAction Stop
+            try {
+              Remove-Item -LiteralPath $source.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+              Write-Warning "PowerShell could not delete $($source.FullName): $_; trying rmdir.exe"
+              & cmd.exe /d /c "rmdir /s /q `"$($source.FullName)`""
+              if (Test-Path -LiteralPath $source.FullName) {
+                Write-Warning "Qt source cleanup incomplete; disk-space validation will run next."
+              }
+            }
           }
           $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
           Write-Host ("Windows C: free after Qt build-tree cleanup: {0:n1} GiB" -f ($disk.FreeSpace / 1GB))
@@ -248,36 +279,38 @@ jobs:
           $free = [math]::Round($disk.FreeSpace / 1GB, 1)
           Write-Host "Free C: drive space after Qt setup: $free GiB"
           if ($free -lt 8) {
-            throw "Insufficient disk space for a tdesktop Debug build (need at least 8 GiB after Qt setup)."
+            throw "Insufficient disk space for a tdesktop $env:CROSSGRAM_BUILD_TYPE build (need at least 8 GiB after Qt setup)."
           }
       - name: Compile CrossGram WSS client
         run: |
           cd %TBUILD%\tdesktop\Telegram
           call configure.bat x64 qt6 ^
             %TDESKTOP_API_OPTIONS% ^
-            -D CMAKE_CONFIGURATION_TYPES=Debug ^
+            -D CMAKE_CONFIGURATION_TYPES=%CROSSGRAM_BUILD_TYPE% ^
             -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
             -D CMAKE_C_FLAGS_DEBUG="/Od /Ob0" ^
             -D CMAKE_CXX_FLAGS_DEBUG="/Od /Ob0" ^
             -D CMAKE_EXE_LINKER_FLAGS_DEBUG="/INCREMENTAL:NO" ^
             -D CROSSGRAM_WSS_BUILD=ON
           if errorlevel 1 exit /b %errorlevel%
-          cmake --build ..\out --config Debug --parallel 4
+          cmake --build ..\out --config %CROSSGRAM_BUILD_TYPE% --parallel 4
       - name: Archive Windows binaries
         shell: pwsh
         run: |
-          $dir = "dist/crossgram-wss-windows-x64"
+          $flavor = $env:CROSSGRAM_BUILD_TYPE.ToLowerInvariant()
+          $folder = "crossgram-wss-windows-x64-$flavor"
+          $dir = "dist/$folder"
           New-Item -ItemType Directory -Force $dir | Out-Null
-          Copy-Item "TBuild/tdesktop/out/Debug/Telegram.exe" "$dir/CrossGram.exe"
+          Copy-Item "TBuild/tdesktop/out/$env:CROSSGRAM_BUILD_TYPE/Telegram.exe" "$dir/CrossGram.exe"
           $extra = @()
           if ($env:GITHUB_REF -like "refs/tags/*") { $extra += "--require-public-key" }
           python TBuild/tdesktop/scripts/crossgram_wss_config.py --output "$dir/crossgram-wss.json" @extra
           Copy-Item "TBuild/tdesktop/docs/crossgram-wss.md" "$dir/README-WSS.md"
-          Compress-Archive -Path "$dir/*" -DestinationPath "dist/crossgram-wss-windows-x64.zip"
+          Compress-Archive -Path "$dir/*" -DestinationPath "dist/$folder.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: crossgram-wss-windows-x64
-          path: dist/crossgram-wss-windows-x64.zip
+          name: crossgram-wss-windows-x64-${{ env.CROSSGRAM_BUILD_TYPE }}
+          path: dist/crossgram-wss-windows-x64-*.zip
           retention-days: 14
           if-no-files-found: error
 
