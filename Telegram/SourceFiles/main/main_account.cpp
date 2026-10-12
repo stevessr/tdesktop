@@ -9,6 +9,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/platform/base_platform_info.h"
 #include "core/application.h"
+#ifdef CROSSGRAM_WSS_BUILD
+#include "crossgram/connection_settings.h"
+#include <QtCore/QCoreApplication>
+#endif
 #include "storage/storage_account.h"
 #include "storage/storage_domain.h" // Storage::StartResult.
 #include "storage/serialize_common.h"
@@ -77,10 +81,36 @@ std::unique_ptr<MTP::Config> Account::prepareToStart(
 
 void Account::start(std::unique_ptr<MTP::Config> config) {
 	_appConfig = std::make_unique<AppConfig>(this);
-	startMtp(config
+	auto ready = config
 		? std::move(config)
 		: std::make_unique<MTP::Config>(
-			Core::App().fallbackProductionConfig()));
+			Core::App().fallbackProductionConfig());
+#ifdef CROSSGRAM_WSS_BUILD
+	auto settings = Crossgram::ConnectionSettings();
+	auto failure = QString();
+	const auto location = QCoreApplication::applicationDirPath()
+		+ u"/crossgram-wss.json"_q;
+	const auto loaded = Crossgram::LoadConnectionSettings(
+		location, &settings, &failure);
+	const auto hasKeys = !_mtpFields.keys.empty()
+		|| !_mtpKeysToDestroy.empty() || bool(_sessionUserId);
+	const auto identityMatches = _crossgramIdentity.isEmpty()
+		? !hasKeys
+		: (loaded && _crossgramIdentity == settings.identity);
+	if (!loaded || !identityMatches
+		|| !ready->dcOptions().activateCrossgram(
+			settings.url, settings.rsaPublicKey, settings.dataCenters)) {
+		LOG(("CrossGram WSS offline: configuration unavailable, "
+			"key binding mismatch, or invalid RSA public key."));
+		ready->dcOptions().blockCrossgram();
+	} else {
+		_crossgramIdentity = settings.identity;
+	}
+#endif
+	startMtp(std::move(ready));
+#ifdef CROSSGRAM_WSS_BUILD
+	local().writeMtpData();
+#endif
 	_appConfig->start();
 	watchProxyChanges();
 	watchSessionChanges();
@@ -319,6 +349,11 @@ QByteArray Account::serializeMtpAuthorization() const {
 				<< qint32(mainDcId);
 			writeKeys(stream, keys);
 			writeKeys(stream, keysToDestroy);
+#ifdef CROSSGRAM_WSS_BUILD
+			if (!_crossgramIdentity.isEmpty()) {
+				stream << quint32(0x43575332) << _crossgramIdentity;
+			}
+#endif
 
 			DEBUG_LOG(("MTP Info: Keys written, userId: %1, dcId: %2"
 				).arg(currentUserId.bare
@@ -417,6 +452,16 @@ void Account::setMtpAuthorization(const QByteArray &serialized) {
 	};
 	readKeys(_mtpFields.keys);
 	readKeys(_mtpKeysToDestroy);
+#ifdef CROSSGRAM_WSS_BUILD
+	if (!stream.atEnd()) {
+		auto tag = quint32();
+		stream >> tag >> _crossgramIdentity;
+		if (stream.status() != QDataStream::Ok || tag != 0x43575332
+			|| _crossgramIdentity.size() != 32) {
+			_crossgramIdentity = "invalid";
+		}
+	}
+#endif
 	LOG(("MTP Info: "
 		"read keys, current: %1, to destroy: %2"
 		).arg(_mtpFields.keys.size()

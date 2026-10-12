@@ -8,6 +8,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/connection_tcp.h"
 
 #include "mtproto/details/mtproto_abstract_socket.h"
+#ifdef CROSSGRAM_WSS_BUILD
+#include "crossgram/wss_socket.h"
+#include "mtproto/mtp_instance.h"
+#endif
 #include "mtproto/details/mtproto_web_proxy_socket.h"
 #include "base/bytes.h"
 #include "base/openssl_help.h"
@@ -540,6 +544,14 @@ void TcpConnection::connectToServer(
 			ToNetworkProxy(_proxy),
 			protocolForFiles);
 	_protocolDcId = protocolDcId;
+#ifdef CROSSGRAM_WSS_BUILD
+	if (_instance->dcOptions().crossgramActive()) {
+		_protocol = Protocol::Create({});
+		_socket = std::make_unique<WssSocket>(
+			thread(),
+			QUrl(_instance->dcOptions().crossgramUrl(), QUrl::StrictMode));
+	}
+#endif
 
 	const auto postfix = _socket->debugPostfix();
 	_debugId = u"%1(dc:%2,%3%4:%5%6)"_q
@@ -649,6 +661,9 @@ QString TcpConnection::transport() const {
 	if (!isConnected()) {
 		return QString();
 	}
+#ifdef CROSSGRAM_WSS_BUILD
+	if (_instance->dcOptions().crossgramActive()) return u"WSS/CDN"_q;
+#endif
 	auto result = u"TCP"_q;
 	if (qthelp::is_ipv6(_address)) {
 		result += u"/IPv6"_q;
@@ -657,6 +672,9 @@ QString TcpConnection::transport() const {
 }
 
 QString TcpConnection::tag() const {
+#ifdef CROSSGRAM_WSS_BUILD
+	if (_instance->dcOptions().crossgramActive()) return u"WSS/CDN"_q;
+#endif
 	auto result = u"TCP"_q;
 	if (qthelp::is_ipv6(_address)) {
 		result += u"/IPv6"_q;

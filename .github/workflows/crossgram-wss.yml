@@ -1,0 +1,337 @@
+name: CrossGram over WSS CDN
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build configuration (Debug or Release)'
+        type: choice
+        options:
+          - Debug
+          - Release
+        default: Debug
+        required: true
+  push:
+    tags:
+      - 'crossgram-wss-v*'
+  pull_request:
+    paths:
+      - '.github/workflows/crossgram-wss.yml'
+      - 'scripts/crossgram_wss_config.py'
+      - 'Telegram/SourceFiles/crossgram/**'
+      - 'Telegram/SourceFiles/mtproto/**'
+      - 'Telegram/SourceFiles/main/main_account.*'
+      - 'Telegram/SourceFiles/core/launcher.cpp'
+      - 'Telegram/CMakeLists.txt'
+      - 'Telegram/build/prepare/prepare.py'
+      - 'Telegram/build/docker/centos_env/Dockerfile'
+
+concurrency:
+  group: crossgram-wss-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CROSSGRAM_WSS_URL: ${{ vars.CROSSGRAM_WSS_URL }}
+  CROSSGRAM_RSA_PUBLIC_PEM_B64: ${{ vars.CROSSGRAM_RSA_PUBLIC_PEM_B64 }}
+  CROSSGRAM_API_ID: ${{ vars.CROSSGRAM_API_ID }}
+  CROSSGRAM_API_HASH: ${{ vars.CROSSGRAM_API_HASH }}
+  CROSSGRAM_BUILD_TYPE: ${{ startsWith(github.ref, 'refs/tags/crossgram-wss-v') && 'Release' || inputs.build_type || 'Debug' }}
+
+jobs:
+  native-smoke:
+    name: CrossGram WSS source validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev qt6-websockets-dev pkg-config
+      - name: Type-check native transport and configuration
+        run: |
+          c++ -std=c++20 -fPIC -fsyntax-only \
+            -include scripts/crossgram/qt_literal_smoke.h \
+            -I Telegram/SourceFiles \
+            $(pkg-config --cflags Qt6Core Qt6Network Qt6WebSockets) \
+            Telegram/SourceFiles/crossgram/wss_transport.cpp \
+            Telegram/SourceFiles/crossgram/connection_settings.cpp
+      - name: Validate public config generator
+        run: |
+          python3 -m py_compile scripts/crossgram_wss_config.py
+          python3 scripts/crossgram_wss_config.py --output /tmp/crossgram-wss.json
+          test -f /tmp/crossgram-wss.json.example
+          if CROSSGRAM_WSS_URL='ws://example.org/mtproto' \
+            python3 scripts/crossgram_wss_config.py --output /tmp/rejected.json; then
+            echo 'Rejected insecure ws:// URL was accepted' >&2
+            exit 1
+          fi
+
+  linux:
+    needs: native-smoke
+    name: CrossGram Linux x64
+    runs-on: ${{ vars.CROSSGRAM_LINUX_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Setup build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-venv ccache
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Generate Linux build Dockerfile
+        working-directory: Telegram/build/docker/centos_env
+        run: |
+          "$HOME/.local/bin/poetry" install
+          DOCKERFILE="$(DEBUG= LTO= "$HOME/.local/bin/poetry" run gen_dockerfile)"
+          test -n "$DOCKERFILE"
+          printf "%s\\n" "$DOCKERFILE" > Dockerfile
+      - uses: docker/setup-buildx-action@v3
+      - name: Reuse Docker dependency layers
+        uses: docker/build-push-action@v6
+        with:
+          context: Telegram/build/docker/centos_env
+          file: Telegram/build/docker/centos_env/Dockerfile
+          push: false
+          load: true
+          tags: crossgram-qt-wss:latest
+          cache-from: type=gha,scope=crossgram-wss-linux-deps
+          cache-to: type=gha,scope=crossgram-wss-linux-deps,mode=min,ignore-error=true
+      - name: Restore native Linux compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/crossgram-ccache
+          key: crossgram-wss-linux-ccache-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            crossgram-wss-linux-ccache-${{ runner.os }}-
+      - name: Prepare native Linux compiler cache
+        run: mkdir -p "$RUNNER_TEMP/crossgram-ccache"
+      - name: Resolve API options
+        shell: bash
+        run: |
+          if [[ -n "$CROSSGRAM_API_ID" && -n "$CROSSGRAM_API_HASH" ]]; then
+            printf 'TDESKTOP_API_OPTIONS=-D TDESKTOP_API_ID=%s -D TDESKTOP_API_HASH=%s\n' "$CROSSGRAM_API_ID" "$CROSSGRAM_API_HASH" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF" == refs/tags/crossgram-wss-v* ]]; then
+            echo "::error::Set CROSSGRAM_API_ID and CROSSGRAM_API_HASH repository variables before releasing."
+            exit 1
+          else
+            echo "TDESKTOP_API_OPTIONS=-D TDESKTOP_API_TEST=ON" >> "$GITHUB_ENV"
+          fi
+      - name: Compile CrossGram WSS client
+        shell: bash
+        run: |
+          args=( -D CMAKE_CONFIGURATION_TYPES="$CROSSGRAM_BUILD_TYPE" -D CROSSGRAM_WSS_BUILD=ON )
+          if [[ "$CROSSGRAM_BUILD_TYPE" == Debug ]]; then
+            args+=( -D CMAKE_C_FLAGS_DEBUG="-O0 -fpch-preprocess" )
+            args+=( -D CMAKE_CXX_FLAGS_DEBUG="-O0 -fpch-preprocess" )
+          fi
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -v "$PWD:/usr/src/tdesktop" \
+            -v "$RUNNER_TEMP/crossgram-ccache:/var/cache/ccache" \
+            -e CCACHE_MAXSIZE=1500M \
+            -e CONFIG="$CROSSGRAM_BUILD_TYPE" \
+            crossgram-qt-wss \
+            /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
+            "${args[@]}" $TDESKTOP_API_OPTIONS
+      - name: Save native Linux compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/crossgram-ccache
+          key: crossgram-wss-linux-ccache-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Create Linux release archive
+        shell: bash
+        run: |
+          flavor="${CROSSGRAM_BUILD_TYPE,,}"
+          folder="crossgram-wss-linux-x64-$flavor"
+          mkdir -p "dist/$folder"
+          install -m 755 "out/$CROSSGRAM_BUILD_TYPE/Telegram" "dist/$folder/CrossGram"
+          python3 scripts/crossgram_wss_config.py \
+            --output "dist/$folder/crossgram-wss.json" \
+            ${{ startsWith(github.ref, 'refs/tags/') && '--require-public-key' || '' }}
+          cp docs/crossgram-wss.md "dist/$folder/README-WSS.md"
+          tar -czf "dist/$folder.tar.gz" -C dist "$folder"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crossgram-wss-linux-x64-${{ env.CROSSGRAM_BUILD_TYPE }}
+          path: dist/crossgram-wss-linux-x64-*.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
+  windows:
+    needs: native-smoke
+    name: CrossGram Windows x64
+    runs-on: ${{ vars.CROSSGRAM_WINDOWS_RUNNER || 'windows-latest' }}
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Reclaim optional Windows SDK storage
+        shell: pwsh
+        run: |
+          $unused = @(
+            'C:\Program Files (x86)\Android',
+            'C:\Program Files\Android',
+            'C:\Program Files\dotnet\sdk',
+            'C:\hostedtoolcache\windows\go',
+            'C:\hostedtoolcache\windows\Ruby'
+          )
+          foreach ($path in $unused) {
+            if (Test-Path -LiteralPath $path) {
+              Write-Host "Reclaiming unused runner component: $path"
+              try {
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+              } catch {
+                Write-Warning "Could not remove $path : $_"
+              }
+            }
+          }
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+          Write-Host ("Windows C: free: {0:n1} GiB" -f ($disk.FreeSpace / 1GB))
+      - name: Prepare directory layout
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: TBuild/tdesktop
+      - name: Get required SDK version
+        shell: bash
+        run: |
+          sdk="$(grep 'SDK version' TBuild/tdesktop/docs/building-win.md | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$sdk" >> "$GITHUB_ENV"
+      - uses: Eden-CI/msvc-dev-cmd@master
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: '14.44'
+      - name: NuGet sources
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+      - name: Restore Windows package caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            ~\.nuget\packages
+          key: crossgram-wss-windows-pkgs-${{ runner.os }}-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/prepare.py') }}
+          restore-keys: |
+            crossgram-wss-windows-pkgs-${{ runner.os }}-
+      - name: Prepare Qt libraries
+        run: |
+          if /I "%CROSSGRAM_BUILD_TYPE%"=="Debug" (
+            call %TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent qt6
+          ) else (
+            call %TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent qt6
+          )
+          if errorlevel 1 exit /b %errorlevel%
+      - name: Reclaim installed Qt source and intermediate build tree
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:USERPROFILE 'TBuild\Libraries\win64'
+          # Qt lives in Libraries/win64/Qt-<version>, not in Libraries/win64/local.
+          # Do not remove its source tree unless the installed Qt6 CMake package exists.
+          $installed = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'Qt-*' -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'lib\cmake\Qt6\Qt6Config.cmake') })
+          if ($installed.Count -eq 0) {
+            throw "No installed Qt6 CMake package in $root; refusing to remove Qt sources."
+          }
+          Write-Host "Installed Qt: $($installed.FullName -join ', ')"
+          $sources = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'qt_*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^qt_[0-9]' })
+          foreach ($source in $sources) {
+            Write-Host "Removing unused Qt source/build stage: $($source.FullName)"
+            try {
+              Remove-Item -LiteralPath $source.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+              Write-Warning "PowerShell could not delete $($source.FullName): $_; trying rmdir.exe"
+              & cmd.exe /d /c "rmdir /s /q `"$($source.FullName)`""
+              if (Test-Path -LiteralPath $source.FullName) {
+                Write-Warning "Qt source cleanup incomplete; disk-space validation will run next."
+              }
+            }
+          }
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+          Write-Host ("Windows C: free after Qt build-tree cleanup: {0:n1} GiB" -f ($disk.FreeSpace / 1GB))
+      - name: Resolve API options
+        shell: bash
+        run: |
+          if [[ -n "$CROSSGRAM_API_ID" && -n "$CROSSGRAM_API_HASH" ]]; then
+            printf 'TDESKTOP_API_OPTIONS=-D TDESKTOP_API_ID=%s -D TDESKTOP_API_HASH=%s\n' "$CROSSGRAM_API_ID" "$CROSSGRAM_API_HASH" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF" == refs/tags/crossgram-wss-v* ]]; then
+            echo "::error::Set CROSSGRAM_API_ID and CROSSGRAM_API_HASH repository variables before releasing."
+            exit 1
+          else
+            echo "TDESKTOP_API_OPTIONS=-D TDESKTOP_API_TEST=ON" >> "$GITHUB_ENV"
+          fi
+      - name: Verify Windows disk space
+        shell: pwsh
+        run: |
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+          $free = [math]::Round($disk.FreeSpace / 1GB, 1)
+          Write-Host "Free C: drive space after Qt setup: $free GiB"
+          if ($free -lt 8) {
+            throw "Insufficient disk space for a tdesktop $env:CROSSGRAM_BUILD_TYPE build (need at least 8 GiB after Qt setup)."
+          }
+      - name: Compile CrossGram WSS client
+        run: |
+          cd %TBUILD%\tdesktop\Telegram
+          call configure.bat x64 qt6 ^
+            %TDESKTOP_API_OPTIONS% ^
+            -D CMAKE_CONFIGURATION_TYPES=%CROSSGRAM_BUILD_TYPE% ^
+            -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
+            -D CMAKE_C_FLAGS_DEBUG="/Od /Ob0" ^
+            -D CMAKE_CXX_FLAGS_DEBUG="/Od /Ob0" ^
+            -D CMAKE_EXE_LINKER_FLAGS_DEBUG="/INCREMENTAL:NO" ^
+            -D CROSSGRAM_WSS_BUILD=ON
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build ..\out --config %CROSSGRAM_BUILD_TYPE% --parallel 4
+      - name: Archive Windows binaries
+        shell: pwsh
+        run: |
+          $flavor = $env:CROSSGRAM_BUILD_TYPE.ToLowerInvariant()
+          $folder = "crossgram-wss-windows-x64-$flavor"
+          $dir = "dist/$folder"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item "TBuild/tdesktop/out/$env:CROSSGRAM_BUILD_TYPE/Telegram.exe" "$dir/CrossGram.exe"
+          $extra = @()
+          if ($env:GITHUB_REF -like "refs/tags/*") { $extra += "--require-public-key" }
+          python TBuild/tdesktop/scripts/crossgram_wss_config.py --output "$dir/crossgram-wss.json" @extra
+          Copy-Item "TBuild/tdesktop/docs/crossgram-wss.md" "$dir/README-WSS.md"
+          Compress-Archive -Path "$dir/*" -DestinationPath "dist/$folder.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crossgram-wss-windows-x64-${{ env.CROSSGRAM_BUILD_TYPE }}
+          path: dist/crossgram-wss-windows-x64-*.zip
+          retention-days: 14
+          if-no-files-found: error
+
+  publish:
+    name: Publish CrossGram WSS binaries
+    if: startsWith(github.ref, 'refs/tags/crossgram-wss-v')
+    runs-on: ubuntu-latest
+    needs: [linux, windows]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: crossgram-wss-*
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "CrossGram over WSS/CDN $GITHUB_REF_NAME" \
+            --generate-notes

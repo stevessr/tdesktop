@@ -644,6 +644,11 @@ void Launcher::processArguments() {
 		.join(QString())
 		.toLower()
 		.replace(RegExp, {});
+#ifdef CROSSGRAM_WSS_BUILD
+	gKeyFile = gKeyFile.isEmpty()
+		? u"crossgram"_q
+		: (u"crossgram-"_q + gKeyFile);
+#endif
 	gLaunchMode = parseResult.contains("-autostart") ? LaunchModeAutoStart
 		: parseResult.contains("-fixprevious") ? LaunchModeFixPrevious
 		: parseResult.contains("-cleanup") ? LaunchModeCleanup

@@ -116,7 +116,8 @@ void ConfigLoader::enumerate() {
 }
 
 void ConfigLoader::refreshSpecialLoader() {
-	if (_proxyEnabled || _instance->isKeysDestroyer()) {
+	if (_proxyEnabled || _instance->isKeysDestroyer()
+		|| _instance->dcOptions().crossgramVariant()) {
 		_specialLoader.reset();
 		return;
 	}

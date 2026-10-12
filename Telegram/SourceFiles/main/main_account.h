@@ -163,6 +163,9 @@ private:
 	int32 _sessionUserStreamVersion = 0;
 	std::unique_ptr<SessionSettings> _storedSessionSettings;
 	MTP::Instance::Fields _mtpFields;
+#ifdef CROSSGRAM_WSS_BUILD
+	QByteArray _crossgramIdentity;
+#endif
 	MTP::AuthKeysList _mtpKeysToDestroy;
 	bool _loggingOut = false;
 	bool _destroyingSession = false;
