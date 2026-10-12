@@ -81,8 +81,25 @@ jobs:
           test -n "$DOCKERFILE"
           printf "%s\\n" "$DOCKERFILE" > Dockerfile
       - uses: docker/setup-buildx-action@v3
-      - name: Build Qt and dependencies image
-        run: docker build -t crossgram-qt-wss Telegram/build/docker/centos_env
+      - name: Reuse Docker dependency layers
+        uses: docker/build-push-action@v6
+        with:
+          context: Telegram/build/docker/centos_env
+          file: Telegram/build/docker/centos_env/Dockerfile
+          push: false
+          load: true
+          tags: crossgram-qt-wss:latest
+          cache-from: type=gha,scope=crossgram-wss-linux-deps
+          cache-to: type=gha,scope=crossgram-wss-linux-deps,mode=min,ignore-error=true
+      - name: Restore native Linux compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/crossgram-ccache
+          key: crossgram-wss-linux-ccache-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            crossgram-wss-linux-ccache-${{ runner.os }}-
+      - name: Prepare native Linux compiler cache
+        run: mkdir -p "$RUNNER_TEMP/crossgram-ccache"
       - name: Resolve API options
         shell: bash
         run: |
@@ -97,8 +114,10 @@ jobs:
       - name: Compile CrossGram WSS client
         shell: bash
         run: |
-          docker run --rm -u "$(id -u)" \
+          docker run --rm -u "$(id -u):$(id -g)" \
             -v "$PWD:/usr/src/tdesktop" \
+            -v "$RUNNER_TEMP/crossgram-ccache:/var/cache/ccache" \
+            -e CCACHE_MAXSIZE=1500M \
             -e CONFIG=Debug \
             crossgram-qt-wss \
             /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
@@ -107,6 +126,12 @@ jobs:
             -D CMAKE_CXX_FLAGS_DEBUG="-O0 -fpch-preprocess" \
             -D CROSSGRAM_WSS_BUILD=ON \
             $TDESKTOP_API_OPTIONS
+      - name: Save native Linux compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/crossgram-ccache
+          key: crossgram-wss-linux-ccache-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Create Linux release archive
         shell: bash
         run: |
@@ -177,9 +202,34 @@ jobs:
         run: |
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
           nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+      - name: Restore Windows package caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            ~\.nuget\packages
+          key: crossgram-wss-windows-pkgs-${{ runner.os }}-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/prepare.py') }}
+          restore-keys: |
+            crossgram-wss-windows-pkgs-${{ runner.os }}-
       - name: Prepare Qt libraries
         run: |
           %TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent qt6
+      - name: Reclaim installed Qt source and intermediate build tree
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:USERPROFILE 'TBuild\Libraries\win64'
+          $installed = @(Get-ChildItem -LiteralPath (Join-Path $root 'local') -Directory -Filter 'Qt-*' -ErrorAction SilentlyContinue)
+          if ($installed.Count -eq 0) {
+            throw "Qt installation not found; refusing to remove Qt build sources."
+          }
+          $sources = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'qt_*' -ErrorAction SilentlyContinue)
+          foreach ($source in $sources) {
+            Write-Host "Removing unused Qt source/build stage: $($source.FullName)"
+            Remove-Item -LiteralPath $source.FullName -Recurse -Force -ErrorAction Stop
+          }
+          $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+          Write-Host ("Windows C: free after Qt build-tree cleanup: {0:n1} GiB" -f ($disk.FreeSpace / 1GB))
       - name: Resolve API options
         shell: bash
         run: |
@@ -207,9 +257,12 @@ jobs:
             %TDESKTOP_API_OPTIONS% ^
             -D CMAKE_CONFIGURATION_TYPES=Debug ^
             -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
+            -D CMAKE_C_FLAGS_DEBUG="/Od /Ob0" ^
+            -D CMAKE_CXX_FLAGS_DEBUG="/Od /Ob0" ^
+            -D CMAKE_EXE_LINKER_FLAGS_DEBUG="/INCREMENTAL:NO" ^
             -D CROSSGRAM_WSS_BUILD=ON
           if errorlevel 1 exit /b %errorlevel%
-          cmake --build ..\out --config Debug --parallel 6
+          cmake --build ..\out --config Debug --parallel 4
       - name: Archive Windows binaries
         shell: pwsh
         run: |
